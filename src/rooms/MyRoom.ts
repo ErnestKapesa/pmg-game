@@ -15,31 +15,67 @@ export class MyRoom extends Room<MyRoomState> {
     this.generateItems();
     this.generateObstacles();
 
-    // Start timer
+    // Start timer with error handling to prevent crashes
     this.clock.setInterval(() => {
-      if (this.state.remainingTime > 0) {
-        this.state.remainingTime--;
-      } else {
-        this.endLevel();
+      try {
+        if (this.state.remainingTime > 0) {
+          this.state.remainingTime--;
+        } else {
+          this.endLevel();
+        }
+      } catch (error) {
+        console.error('Timer error in room', this.roomId, ':', error);
+        // Attempt to recover by resetting timer if needed
+        if (this.state.remainingTime <= 0) {
+          this.state.remainingTime = 60;
+        }
       }
     }, 1000);
 
     this.onMessage("chat", (client: Client, message: string) => {
-      const chatMsg = new ChatMessage();
-      const player = this.state.players.get(client.sessionId);
-      if (player) {
-        chatMsg.sender = player.username;
-      } else {
-        chatMsg.sender = "Anonymous";
+      try {
+        // Validate chat message
+        if (typeof message !== 'string' || message.trim().length === 0) {
+          console.warn('Invalid chat message from client', client.sessionId);
+          return;
+        }
+
+        // Limit message length to prevent spam
+        const sanitizedMessage = message.trim().substring(0, 200);
+        
+        const chatMsg = new ChatMessage();
+        const player = this.state.players.get(client.sessionId);
+        if (player) {
+          chatMsg.sender = player.username || "Anonymous";
+        } else {
+          chatMsg.sender = "Anonymous";
+        }
+        chatMsg.text = sanitizedMessage;
+        chatMsg.timestamp = Date.now();
+        
+        // Limit chat history to prevent memory issues
+        this.state.chatMessages.push(chatMsg);
+        if (this.state.chatMessages.length > 50) {
+          this.state.chatMessages.splice(0, this.state.chatMessages.length - 50);
+        }
+      } catch (error) {
+        console.error('Error handling chat message from client', client.sessionId, ':', error);
       }
-      chatMsg.text = message;
-      chatMsg.timestamp = Date.now();
-      this.state.chatMessages.push(chatMsg);
     });
 
     this.onMessage("move", (client: Client, { dx, dy }: { dx: number; dy: number }) => {
-      const player = this.state.players.get(client.sessionId);
-      if (player && player.active) {
+      try {
+        const player = this.state.players.get(client.sessionId);
+        if (!player || !player.active) {
+          return; // Player not found or inactive
+        }
+
+        // Validate movement input
+        if (typeof dx !== 'number' || typeof dy !== 'number') {
+          console.warn('Invalid movement data from client', client.sessionId);
+          return;
+        }
+
         const newX = Math.max(0, Math.min(19, player.x + dx));
         const newY = Math.max(0, Math.min(19, player.y + dy));
 
@@ -50,6 +86,7 @@ export class MyRoom extends Room<MyRoomState> {
             collided = true;
           }
         });
+        
         if (collided) {
           player.active = false;
           this.broadcast("playerLost", { playerId: client.sessionId });
@@ -64,70 +101,99 @@ export class MyRoom extends Room<MyRoomState> {
         player.x = newX;
         player.y = newY;
 
-        // Check for collection
+        // Check for collection with error handling
+        const itemsToRemove: string[] = [];
         this.state.items.forEach((item, id) => {
           if (item.x === newX && item.y === newY) {
-            player.score += item.value;
-            this.state.items.delete(id);
+            player.score += item.value || 1; // Fallback value
+            itemsToRemove.push(id);
             this.broadcast("collect", { playerId: client.sessionId, itemId: id });
           }
         });
+        
+        // Remove collected items
+        itemsToRemove.forEach(id => {
+          this.state.items.delete(id);
+        });
 
         // Removed endGame on all items collected to allow timer-based levels
-
+      } catch (error) {
+        console.error('Error handling move message from client', client.sessionId, ':', error);
       }
     });
 
     }
 
   endLevel() {
-    const activePlayers = Array.from(this.state.players.values()).filter(p => p.active);
-    if (activePlayers.length <= 1) {
-      this.endGame();
-      return;
+    try {
+      const activePlayers = Array.from(this.state.players.values()).filter(p => p.active);
+      if (activePlayers.length <= 1) {
+        this.endGame();
+        return;
+      }
+
+      // Find min score with safety check
+      if (activePlayers.length === 0) {
+        console.warn('No active players found during endLevel');
+        return;
+      }
+
+      const minScore = Math.min(...activePlayers.map(p => p.score));
+      // Eliminate players with min score
+      activePlayers.forEach(p => {
+        if (p.score === minScore) {
+          p.active = false;
+          this.broadcast("playerEliminated", { playerId: p.id });
+        }
+      });
+
+      // Advance to next level
+      this.state.level++;
+      this.broadcast("levelUp", { level: this.state.level });
+
+      // Regenerate items (new coins)
+      this.state.items.clear();
+      this.generateItems();
+
+      // Optionally regenerate obstacles if desired
+      // this.state.obstacles.clear();
+      // this.generateObstacles();
+
+      // Reset player positions with error handling
+      this.state.players.forEach((player: Player) => {
+        if (player.active) {
+          let x: number;
+          let y: number;
+          let occupied: boolean;
+          let attempts = 0;
+          const maxAttempts = 100; // Prevent infinite loops
+          
+          do {
+            x = Math.floor(Math.random() * 20);
+            y = Math.floor(Math.random() * 20);
+            occupied = Array.from(this.state.obstacles.values()).some((obs: Obstacle) => obs.x === x && obs.y === y) ||
+                       Array.from(this.state.items.values()).some((it: Item) => it.x === x && it.y === y);
+            attempts++;
+          } while (occupied && attempts < maxAttempts);
+          
+          if (attempts >= maxAttempts) {
+            console.warn('Could not find free position for player', player.id, 'using fallback');
+            x = Math.floor(Math.random() * 20);
+            y = Math.floor(Math.random() * 20);
+          }
+          
+          player.x = x;
+          player.y = y;
+        }
+      });
+
+      // Reset timer
+      this.state.remainingTime = 60; // Adjust as needed
+    } catch (error) {
+      console.error('Error in endLevel:', error);
+      // Fallback: just reset timer and continue
+      this.state.remainingTime = 60;
     }
-
-    // Find min score
-    const minScore = Math.min(...activePlayers.map(p => p.score));
-    // Eliminate players with min score
-    activePlayers.forEach(p => {
-      if (p.score === minScore) {
-        p.active = false;
-        this.broadcast("playerEliminated", { playerId: p.id });
-      }
-    });
-
-    // Advance to next level
-    this.state.level++;
-    this.broadcast("levelUp", { level: this.state.level });
-
-    // Regenerate items (new coins)
-    this.state.items.clear();
-    this.generateItems();
-
-    // Optionally regenerate obstacles if desired
-    // this.state.obstacles.clear();
-    // this.generateObstacles();
-
-    // Reset player positions
-    this.state.players.forEach((player: Player) => {
-      if (player.active) {
-        let x: number;
-        let y: number;
-        let occupied: boolean;
-        do {
-          x = Math.floor(Math.random() * 20);
-          y = Math.floor(Math.random() * 20);
-          occupied = Array.from(this.state.obstacles.values()).some((obs: Obstacle) => obs.x === x && obs.y === y) ||
-                     Array.from(this.state.items.values()).some((it: Item) => it.x === x && it.y === y);
-        } while (occupied);
-        player.x = x;
-        player.y = y;
-      }
-    });
-
-    // Reset timer
-    this.state.remainingTime = 60; // Adjust as needed
   }
 
   endGame() {
