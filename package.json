@@ -15,8 +15,8 @@
     "clean": "rimraf build",
     "test": "mocha -r tsx test/**_test.ts --exit --timeout 15000",
     "heroku-postbuild": "npm run build"
-   },
-   "author": "",
+  },
+  "author": "",
   "license": "UNLICENSED",
   "bugs": {
     "url": "https://github.com/colyseus/create-colyseus/issues"
