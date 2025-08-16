@@ -255,24 +255,56 @@ export class MyRoom extends Room<MyRoomState> {
   }
 
   onJoin (client: Client, options: any) {
-    console.log(client.sessionId, "joined!");
+    console.log(client.sessionId, "attempting to join!");
+    
+    // Prevent duplicate players from same session
+    if (this.state.players.has(client.sessionId)) {
+      console.warn(`Duplicate join attempt from session ${client.sessionId}, ignoring`);
+      return;
+    }
+    
+    // Check for duplicate username and modify if needed
+    let username = options.username || "Anonymous";
+    const existingPlayer = Array.from(this.state.players.values())
+      .find(p => p.username === username);
+    if (existingPlayer) {
+      username = `${username}_${Date.now().toString().slice(-4)}`;
+      console.log(`Username conflict resolved: ${options.username} -> ${username}`);
+    }
+    
     const player = new Player();
     player.id = client.sessionId;
-    player.username = options.username || "Anonymous";
+    player.username = username;
     player.color = options.color || "black";
     player.active = true; // Ensure active on join
+    player.score = 0; // Initialize score
+    
+    // Find safe spawn position
     let x: number;
     let y: number;
     let occupied: boolean;
+    let attempts = 0;
+    const maxAttempts = 100;
+    
     do {
       x = Math.floor(Math.random() * 20);
       y = Math.floor(Math.random() * 20);
       occupied = Array.from(this.state.obstacles.values()).some((obs: Obstacle) => obs.x === x && obs.y === y) ||
-                 Array.from(this.state.items.values()).some((it: Item) => it.x === x && it.y === y);
-    } while (occupied);
+                 Array.from(this.state.items.values()).some((it: Item) => it.x === x && it.y === y) ||
+                 Array.from(this.state.players.values()).some((p: Player) => p.x === x && p.y === y);
+      attempts++;
+    } while (occupied && attempts < maxAttempts);
+    
+    if (attempts >= maxAttempts) {
+      console.warn(`Could not find safe spawn position for ${client.sessionId}, using fallback`);
+      x = Math.floor(Math.random() * 20);
+      y = Math.floor(Math.random() * 20);
+    }
+    
     player.x = x;
     player.y = y;
     this.state.players.set(client.sessionId, player);
+    console.log(`Player ${client.sessionId} (${username}) joined successfully at (${x}, ${y})`);
   }
 
   onLeave (client: Client, consented: boolean) {
